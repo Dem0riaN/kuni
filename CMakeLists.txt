@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(kuni
-        VERSION 0.0.1 # CI_PROJECT_VERSION
+        VERSION 0.0.2 # CI_PROJECT_VERSION
     )
 
 
