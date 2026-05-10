@@ -1,6 +1,8 @@
 #pragma once
 #include "AUI/IO/APath.h"
 #include "AppBase.h"
+#include "OpenAIChatImpl.h"
+
 #include <gmock/gmock.h>
 
 static const auto TEST_DATA = APath(__FILE__).parent() / "data";
@@ -8,7 +10,9 @@ static const auto TEST_DATA = APath(__FILE__).parent() / "data";
 
 class AppMock : public AppBase {
 public:
-    AppMock() {
+    AppMock(): AppBase({
+        .openAI = _new<OpenAIChatImpl>(),
+    }) {
     }
 
     MOCK_METHOD(void, telegramPostMessage, (const AString& message), ());
@@ -59,4 +63,29 @@ void populateUnrelatedDiaryEntries() {
     for (const auto& f: (TEST_DATA / "random_diary_entries").listDir()) {
         APath::copy(f, diaryDir / f.filename());
     }
+}
+
+template<typename T>
+static T await(AFuture<T> future) {
+    AEventLoop loop;
+    IEventLoop::Handle h(&loop);
+    AAsyncHolder async;
+    T result;
+    AOptional<std::exception_ptr> eptr;
+
+    async << [](AFuture<T> f, T& result, AOptional<std::exception_ptr>& eptr) -> AFuture<> {
+        try {
+            result = co_await std::move(f);
+        } catch (const AException& e) {
+            eptr = std::current_exception();
+        }
+    }(std::move(future), result, eptr);
+
+    while (async.size() > 0) {
+        loop.iteration();
+    }
+    if (eptr) {
+        std::rethrow_exception(eptr.value());
+    }
+    return result;
 }

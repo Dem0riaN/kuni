@@ -1,10 +1,10 @@
-#include "OpenAIChat.h"
+#include "IOpenAIChat.h"
+#include "OpenAITools.h"
 #include <gmock/gmock.h>
 
 #include "common.h"
 #include "AUI/Thread/AAsyncHolder.h"
 #include "AUI/Thread/AEventLoop.h"
-#include "OpenAITools.h"
 #include "config.h"
 #include "util/cosine_similarity.h"
 
@@ -57,7 +57,7 @@ TEST(OpenAIChat, ParseResponseOpenRouter1) {
   }
 }
 )";
-    auto response = aui::from_json<OpenAIChat::Response>(AJson::fromString(R));
+    auto response = aui::from_json<IOpenAIChat::Response>(AJson::fromString(R));
     auto content = response.choices.at(0).message.content;
     content.replaceAll("```json", "");
     content.replaceAll("```", "");
@@ -123,7 +123,7 @@ TEST(OpenAIChat, ParseResponseOpenRouter2) {
     }
 }
 )";
-    auto response = aui::from_json<OpenAIChat::Response>(AJson::fromString(R));
+    auto response = aui::from_json<IOpenAIChat::Response>(AJson::fromString(R));
     AOptional<AJson> args;
     OpenAITools tools {
         {
@@ -166,7 +166,7 @@ TEST(OpenAIChat, ParseResponseOllama1) {
   }
 }
 )";
-    auto response = aui::from_json<OpenAIChat::Response>(AJson::fromString(R));
+    auto response = aui::from_json<IOpenAIChat::Response>(AJson::fromString(R));
     EXPECT_EQ(response.choices.at(0).message.content, "- Title: Telegram chat screenshot.");
     EXPECT_EQ(response.choices.at(0).message.reasoning, "The user wants me to describe the last photo provided.");
     EXPECT_EQ(response.choices.at(0).finish_reason, "stop");
@@ -208,7 +208,7 @@ TEST(OpenAIChat, ParseResponseDeepseek1) {
   "system_fingerprint": "fp_xxx"
 }
 )";
-    auto response = aui::from_json<OpenAIChat::Response>(AJson::fromString(R));
+    auto response = aui::from_json<IOpenAIChat::Response>(AJson::fromString(R));
     EXPECT_EQ(response.id, "chatcmpl-xxx");
     EXPECT_EQ(response.model, "deepseek-v4-flash");
     EXPECT_EQ(response.choices.at(0).message.content, "Ох, кто-то написал аж 3 сообщения! Давай разберёмся ^^");
@@ -218,4 +218,235 @@ TEST(OpenAIChat, ParseResponseDeepseek1) {
     EXPECT_EQ(response.usage.completion_tokens, 513);
     EXPECT_EQ(response.usage.total_tokens, 20814);
     EXPECT_EQ(response.system_fingerprint, "fp_xxx");
+}
+
+// =====================================================================
+// IOpenAIChat::Message::operator+= (streaming merge)
+// =====================================================================
+
+TEST(OpenAIChat, StreamingMessageMerge) {
+    IOpenAIChat::Message base{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "Hello",
+        .reasoning = "Think",
+    };
+    IOpenAIChat::Message delta{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = " world",
+        .reasoning = "ing",
+    };
+    base += delta;
+    EXPECT_EQ(base.content, "Hello world");
+    EXPECT_EQ(base.reasoning, "Thinking");
+}
+
+TEST(OpenAIChat, StreamingMessageMergeEmptyDelta) {
+    IOpenAIChat::Message base{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "Hello",
+    };
+    IOpenAIChat::Message delta{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "",
+    };
+    base += delta;
+    EXPECT_EQ(base.content, "Hello");
+}
+
+TEST(OpenAIChat, StreamingToolCallMerge) {
+    IOpenAIChat::Message base;
+    base.tool_calls = {
+        { .id = "call_1", .index = 0, .function = { .name = "test", .arguments = "{\"a\"" } }
+    };
+    IOpenAIChat::Message delta;
+    delta.tool_calls = {
+        { .id = "", .index = 0, .function = { .name = "", .arguments = ": 1}" } }
+    };
+    base += delta;
+    ASSERT_EQ(base.tool_calls.size(), 1);
+    EXPECT_EQ(base.tool_calls[0].function.arguments, "{\"a\": 1}");
+}
+
+TEST(OpenAIChat, StreamingToolCallMultipleIndices) {
+    IOpenAIChat::Message base;
+    base.tool_calls = {
+        { .id = "call_0", .index = 0, .function = { .name = "fn1", .arguments = "{}" } }
+    };
+    IOpenAIChat::Message delta;
+    delta.tool_calls = {
+        { .id = "call_1", .index = 1, .function = { .name = "fn2", .arguments = "{}" } }
+    };
+    base += delta;
+    ASSERT_EQ(base.tool_calls.size(), 2);
+    EXPECT_EQ(base.tool_calls[0].function.name, "fn1");
+    EXPECT_EQ(base.tool_calls[1].function.name, "fn2");
+}
+
+TEST(OpenAIChat, StreamingMergePreservesRole) {
+    IOpenAIChat::Message base{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "Hello",
+    };
+    IOpenAIChat::Message delta{
+        .role = IOpenAIChat::Message::Role::USER, // role should be overwritten by delta
+        .content = " world",
+    };
+    base += delta;
+    EXPECT_EQ(base.role, IOpenAIChat::Message::Role::USER);
+    EXPECT_EQ(base.content, "Hello world");
+}
+
+// =====================================================================
+// IOpenAIChat::Message::Role JSON conversion
+// =====================================================================
+
+TEST(OpenAIChat, RoleJsonRoundtrip) {
+    auto testRole = [](IOpenAIChat::Message::Role role, const char* expected) {
+        auto json = aui::to_json(role);
+        EXPECT_EQ(json.asString(), expected);
+        IOpenAIChat::Message::Role decoded;
+        AJsonConv<IOpenAIChat::Message::Role>::fromJson(json, decoded);
+        EXPECT_EQ(decoded, role);
+    };
+    testRole(IOpenAIChat::Message::Role::USER, "user");
+    testRole(IOpenAIChat::Message::Role::ASSISTANT, "assistant");
+    testRole(IOpenAIChat::Message::Role::SYSTEM_PROMPT, "system");
+    testRole(IOpenAIChat::Message::Role::TOOL, "tool");
+}
+
+// =====================================================================
+// IOpenAIChat::String JSON conversion (null handling)
+// =====================================================================
+
+TEST(OpenAIChat, NullStringConversion) {
+    AJson nullJson = AJson{nullptr};
+    IOpenAIChat::String out;
+    AJsonConv<IOpenAIChat::String>::fromJson(nullJson, out);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(OpenAIChat, NormalStringConversion) {
+    AJson strJson = "hello";
+    IOpenAIChat::String out;
+    AJsonConv<IOpenAIChat::String>::fromJson(strJson, out);
+    EXPECT_EQ(out, "hello");
+}
+
+// =====================================================================
+// OpenAITools::asJson() serialization
+// =====================================================================
+
+TEST(OpenAITools, ToJsonBasic) {
+    OpenAITools tools = {
+        {
+            .name = "test_tool",
+            .description = "A test tool",
+            .parameters = {
+                .properties = {
+                    {"param1", { .type = "string", .description = "A param" }},
+                },
+                .required = {"param1"},
+            },
+            .handler = [](OpenAITools::Ctx) -> AFuture<AString> { co_return "ok"; },
+        }
+    };
+    auto json = tools.asJson();
+    ASSERT_TRUE(json.isArray());
+    ASSERT_GE(json.asArray().size(), 1);
+    EXPECT_EQ(json[0]["function"]["name"].asString(), "test_tool");
+    EXPECT_EQ(json[0]["function"]["description"].asString(), "A test tool");
+    EXPECT_EQ(json[0]["function"]["parameters"]["type"].asString(), "object");
+    EXPECT_EQ(json[0]["function"]["parameters"]["required"][0].asString(), "param1");
+    EXPECT_EQ(json[0]["function"]["parameters"]["properties"]["param1"]["type"].asString(), "string");
+    EXPECT_EQ(json[0]["function"]["strict"].asBool(), true);
+}
+
+TEST(OpenAITools, ToJsonMultipleTools) {
+    OpenAITools tools = {
+        {
+            .name = "tool_a",
+            .description = "First tool",
+            .handler = [](OpenAITools::Ctx) -> AFuture<AString> { co_return "a"; },
+        },
+        {
+            .name = "tool_b",
+            .description = "Second tool",
+            .handler = [](OpenAITools::Ctx) -> AFuture<AString> { co_return "b"; },
+        },
+    };
+    auto json = tools.asJson();
+    ASSERT_TRUE(json.isArray());
+    ASSERT_EQ(json.asArray().size(), 2);
+    // Order may vary (AMap), so check by name
+    auto names = AVector<AString>{json[0]["function"]["name"].asString(), json[1]["function"]["name"].asString()};
+    EXPECT_TRUE(names.contains("tool_a"));
+    EXPECT_TRUE(names.contains("tool_b"));
+}
+
+TEST(OpenAITools, ToJsonNoParameters) {
+    OpenAITools tools = {
+        {
+            .name = "simple_tool",
+            .description = "No params needed",
+            .handler = [](OpenAITools::Ctx) -> AFuture<AString> { co_return "ok"; },
+        }
+    };
+    auto json = tools.asJson();
+    ASSERT_TRUE(json.isArray());
+    ASSERT_GE(json.asArray().size(), 1);
+    EXPECT_EQ(json[0]["function"]["name"].asString(), "simple_tool");
+    // Should still have parameters object with type "object"
+    EXPECT_EQ(json[0]["function"]["parameters"]["type"].asString(), "object");
+}
+
+// =====================================================================
+// IOpenAIChat::Message serialization to JSON (without embedding tags)
+// =====================================================================
+
+TEST(OpenAIChat, MessageToJsonSimple) {
+    IOpenAIChat::Message msg{
+        .role = IOpenAIChat::Message::Role::USER,
+        .content = "plain text message",
+    };
+    auto json = aui::to_json(AVector<IOpenAIChat::Message>{msg});
+    ASSERT_TRUE(json.isArray());
+    ASSERT_EQ(json.asArray().size(), 1);
+    EXPECT_EQ(json[0]["role"].asString(), "user");
+    EXPECT_EQ(json[0]["content"].asString(), "plain text message");
+}
+
+TEST(OpenAIChat, MessageToJsonAssistantWithReasoning) {
+    IOpenAIChat::Message msg{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "response",
+        .reasoning = "thinking process",
+    };
+    auto json = aui::to_json(AVector<IOpenAIChat::Message>{msg});
+    ASSERT_TRUE(json.isArray());
+    ASSERT_EQ(json.asArray().size(), 1);
+    EXPECT_EQ(json[0]["role"].asString(), "assistant");
+    EXPECT_EQ(json[0]["content"].asString(), "response");
+    EXPECT_EQ(json[0]["reasoning"].asString(), "thinking process");
+}
+
+TEST(OpenAIChat, MessageToJsonToolCall) {
+    IOpenAIChat::Message msg{
+        .role = IOpenAIChat::Message::Role::ASSISTANT,
+        .content = "",
+        .tool_calls = {
+            {
+                .id = "call_1",
+                .index = 0,
+                .type = "function",
+                .function = { .name = "test_tool", .arguments = "{}" },
+            }
+        },
+    };
+    auto json = aui::to_json(AVector<IOpenAIChat::Message>{msg});
+    ASSERT_TRUE(json.isArray());
+    ASSERT_EQ(json.asArray().size(), 1);
+    EXPECT_EQ(json[0]["role"].asString(), "assistant");
+    ASSERT_TRUE(json[0]["tool_calls"].isArray());
+    EXPECT_EQ(json[0]["tool_calls"][0]["id"].asString(), "call_1");
+    EXPECT_EQ(json[0]["tool_calls"][0]["function"]["name"].asString(), "test_tool");
 }

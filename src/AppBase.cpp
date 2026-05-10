@@ -17,11 +17,14 @@
 #include "AUI/Thread/AEventLoop.h"
 #include "AUI/Thread/AThreadPool.h"
 #include "AUI/Util/kAUI.h"
-#include "OpenAIChat.h"
+#include "IOpenAIChat.h"
+#include "OpenAIChatImpl.h"
 #include "config.h"
 #include "KuniCharacter.h"
 #include "WebSearch.h"
 #include "AUI/IO/AFileInputStream.h"
+#include "tools/ask_diary.h"
+#include "tools/ask_google.h"
 #include "util/cosine_similarity.h"
 #include "util/important_things_to_remember.h"
 
@@ -35,11 +38,11 @@ static constexpr auto LOG_TAG = "App";
 static const auto WORKING_MEMORY_PATH = APath("data") / "working_memory.md";
 
 
-AFuture<std::valarray<double>> contextEmbedding(ranges::range auto && rng) {
+AFuture<std::valarray<double>> contextEmbedding(const IOpenAIChat& openAI, ranges::range auto && rng) {
     ALOG_TRACE(LOG_TAG) << "contextEmbedding";
     AString basePrompt;
     AUI_ASSERT(!ranges::empty(rng));
-    for (const OpenAIChat::Message& message: rng) {
+    for (const IOpenAIChat::Message& message: rng) {
         if (!message.reasoning.empty()) {
             basePrompt += message.reasoning;
             basePrompt += "\n\n";
@@ -51,11 +54,13 @@ AFuture<std::valarray<double>> contextEmbedding(ranges::range auto && rng) {
         basePrompt += message.content;
         basePrompt += "\n\n---\n\n";
     }
-    OpenAIChat chat{.config = config::ENDPOINT_EMBEDDING};
-    co_return co_await chat.embedding(basePrompt);
+    co_return co_await openAI.embedding({ .config = config::ENDPOINT_EMBEDDING }, basePrompt);
 }
 
-AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_new<ATimer>(200min)) {
+AppBase::AppBase(Init init): mInit(std::move(init)), mDiary({
+    .diaryDir = mInit.workingDir / "diary",
+    .openAI = mInit.openAI,
+}), mWakeupTimer(_new<ATimer>(200min)) {
     // mTools.addTool({
     //     .name = "send_telegram_message",
     //     .description = "Sends a message to a Telegram user.",
@@ -167,8 +172,8 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                         }
                     }
 
-                    self.mTemporaryContext << OpenAIChat::Message{
-                        .role = OpenAIChat::Message::Role::USER,
+                    self.mTemporaryContext << IOpenAIChat::Message{
+                        .role = IOpenAIChat::Message::Role::USER,
                         .content = std::move(notification.message),
                     };
 
@@ -191,7 +196,7 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                         // performs scan on diary based on entire context.
                         // this will find common cues which are related to current conversation.
                         {
-                            auto currentContext = co_await contextEmbedding(self.mTemporaryContext | ranges::view::take_last(3));
+                            auto currentContext = co_await contextEmbedding(*self.openAI(), self.mTemporaryContext | ranges::view::take_last(3));
                             auto relatednesses = co_await self.mDiary.query(currentContext, {.confidenceFactor = 0.f});
 
                             for (const auto& i : relatednesses) {
@@ -234,12 +239,10 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                         .description = "Wait until further notifications",
                         .handler = escape,
                     });
-                    OpenAIChat llm {
+                    IOpenAIChat::Response botAnswer = co_await self.openAI()->chat( {
                         .systemPrompt = getSystemPrompt(),
                         .tools = notification.actions.asJson(),
-                    };
-
-                    OpenAIChat::Response botAnswer = co_await llm.chat(self.mTemporaryContext);
+                    }, self.mTemporaryContext);
                     AUI_ASSERT(AThread::current() == self.getThread());
 
                     if (botAnswer.choices.empty() || botAnswer.choices.at(0).message.tool_calls.empty()) {
@@ -251,8 +254,8 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                             const auto& content = botAnswer.choices.at(0).message.content;
                             if (content.contains("#send_telegram_message")) {
                                 // qwen3.5 bug: misused examples
-                                self.mTemporaryContext << OpenAIChat::Message{
-                                    .role = OpenAIChat::Message::Role::USER,
+                                self.mTemporaryContext << IOpenAIChat::Message{
+                                    .role = IOpenAIChat::Message::Role::USER,
                                     .content = "Nice thoughts! However you should be tool-centric. Make sure you "
                                     "made tool calls. The message you provided is not visible to anyone but you.",
                                 };
@@ -264,8 +267,8 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                                 // Ой, и что же ты там читаешь? Надеюсь, только самое милое! 😼✨
                                 // </message>
 
-                                self.mTemporaryContext << OpenAIChat::Message{
-                                    .role = OpenAIChat::Message::Role::USER,
+                                self.mTemporaryContext << IOpenAIChat::Message{
+                                    .role = IOpenAIChat::Message::Role::USER,
                                     .content = "Nice thoughts! However you should be tool-centric. Make sure you "
                                     "made tool calls. The message you provided is not visible to anyone but you.",
                                 };
@@ -273,8 +276,8 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                             }
                         }
                         // punish llm for not performing tool calls.
-                        self.mTemporaryContext << OpenAIChat::Message{
-                            .role = OpenAIChat::Message::Role::USER,
+                        self.mTemporaryContext << IOpenAIChat::Message{
+                            .role = IOpenAIChat::Message::Role::USER,
                             .content = "Nice thoughts! However you should be tool-centric. Make sure you "
                             "made tool calls. The message you provided is not visible to anyone but you.",
                         };
@@ -282,7 +285,7 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                     }
                     {
                         auto toolCalls = co_await notification.actions.handleToolCalls(botAnswer.choices.at(0).message.tool_calls);
-                        if (ranges::any_of(toolCalls, [](const OpenAIChat::Message& msg) { return msg.content.contains(OpenAIChat::EMBEDDING_TAG); })) {
+                        if (ranges::any_of(toolCalls, [](const IOpenAIChat::Message& msg) { return msg.content.contains(IOpenAIChat::EMBEDDING_TAG); })) {
                             // Indicates a low quality tool call.
                             //
                             // This tag is used as an exception condition within a tool handler, and handled by AppBase.
@@ -320,7 +323,7 @@ AppBase::AppBase(APath workingDir): mDiary(workingDir / "diary"), mWakeupTimer(_
                     if (!notification.actions.handlers().empty()) {
                         self.mTemporaryContext.last().content += "\nWhat's your next action? Use a `tool` to act. Use #ask_diary to consult with your knowledge database. The following tools available: " + AStringVector(notification.actions.handlers().keyVector()).join(", ");
                     }
-                    if (ranges::any_of(botAnswer.choices.at(0).message.tool_calls, [](const OpenAIChat::Message::ToolCall& t){ return t.function.name == "send_telegram_message"; })) {
+                    if (ranges::any_of(botAnswer.choices.at(0).message.tool_calls, [](const IOpenAIChat::Message::ToolCall& t){ return t.function.name == "send_telegram_message"; })) {
                         goto naxyi_preserve_ctx;
                     } else {
                         goto naxyi_populate_ctx;
@@ -361,19 +364,19 @@ AFuture<> AppBase::diaryDumpMessages() {
         buf << AFileInputStream(WORKING_MEMORY_PATH);
         previousWorkingMemory = AStringView(buf.data(), buf.size());
     }
-    auto importantThingsToRemember = util::importantThingsToRemember(mTemporaryContext, previousWorkingMemory);
+    auto importantThingsToRemember = util::importantThingsToRemember(*openAI(), mTemporaryContext, previousWorkingMemory);
 
-    mTemporaryContext << OpenAIChat::Message{
-        .role = OpenAIChat::Message::Role::USER,
+    mTemporaryContext << IOpenAIChat::Message{
+        .role = IOpenAIChat::Message::Role::USER,
         .content = config::DIARY_PROMPT,
     };
 
-    OpenAIChat chat {
+    IOpenAIChat::Params chatParams{
         .systemPrompt = getSystemPrompt(),
-        // .tools = mTools.asJson, // no tools should be involved.
+        // chatParams.tools = mTools.asJson; // no tools should be involved.
     };
     naxyi:
-    OpenAIChat::Response botAnswer = co_await chat.chat(mTemporaryContext);
+    IOpenAIChat::Response botAnswer = co_await openAI()->chat(chatParams, mTemporaryContext);
     if (botAnswer.choices.at(0).message.content.empty()) {
         goto naxyi;
     }
@@ -387,8 +390,8 @@ AFuture<> AppBase::diaryDumpMessages() {
     auto split = message.split("---");
 
     if (ranges::any_of(split, [](const auto& s) { return s.length() > 3000; })) {
-        mTemporaryContext << OpenAIChat::Message {
-            .role = OpenAIChat::Message::Role::USER,
+        mTemporaryContext << IOpenAIChat::Message {
+            .role = IOpenAIChat::Message::Role::USER,
             .content = "One of your sections are too big. Shorten then and ensure correct division by \"---\".",
         };
     }
@@ -397,7 +400,7 @@ AFuture<> AppBase::diaryDumpMessages() {
         if (take.length() < 20) {
             continue; // random shit
         }
-        auto embedding = co_await OpenAIChat{.config = config::ENDPOINT_EMBEDDING}.embedding(take);
+        auto embedding = co_await openAI()->embedding({ .config = config::ENDPOINT_EMBEDDING }, take);
         if (auto query = co_await mDiary.query(embedding, {.confidenceFactor = 0}); !query.empty()) {
             ALogger::info("AppBase") << "{}.md"_format(id) << ": plagiarism factor other_id=\"" << query.first().entry->id << "\" relatedness =" << float(query.first().relatedness);
             if (query.first().relatedness > config::DIARY_PLAGIARISM_THRESHOLD) {
@@ -456,76 +459,8 @@ Act proactively!
 
 void AppBase::updateTools(OpenAITools& actions) {
     ALOG_TRACE(LOG_TAG) << "updateTools";
-    actions.insert({
-        .name = "ask_diary",
-        .description = "Consult with Kuni's main knowledge database (subagent). Use this to retrieve additional "
-            "pages from diary. USE THIS PROACTIVELY — especially when someone shares personal news, asks about past "
-            "events, or mentions people/activities you might know about.\n\n"
-            "Examples of when to call:\n"
-            "- User says \"I wrote a song today\" → query: \"[sender name] said they wrote a song today. What do I "
-            "  know about them and songs? Do they participate in a band? Which songs do they write? What music do they "
-            "  listen to?\"\n"
-            "- User asks \"what songs am I writing?\" → query: \"What songs does [sender name] write? What do I know "
-            "  about their musical activities?\"\n- User says \"I'm going to the gym\" → query: \"Does [sender name] go "
-            "  to the gym? Any related habits or routines?\"\n"
-            "- You want to ask them a question - check yourself with #ask_diary first\n"
-        ,
-        .parameters = {
-            .properties =
-                {
-                    {"query", {.type = "string", .description = "Freeform question to diary. Provide as much context as possible — include sender name, topic, and what you want to know."}},
-                },
-            .required = {"query"},
-        },
-        .handler = [this](OpenAITools::Ctx ctx) -> AFuture<AString> {
-            auto query = ctx.args["query"].asStringOpt().valueOrException("\"query\" string is required");
-            if (query.length() < 10) {
-                // Alex2772 16-04-2026:
-                // changed from throw AException to co_return.
-                // AException is a technical error and the engine would load additional diary entries
-                // based on embedding search, which LLM might mistakenly interpret as a success call to ask_diary,
-                // losing guiderail to provide more context.
-                // if we return the string as is, the engine would not include diary entries; so the llm
-                // will see a clean response guiding it to provide more context.
-                /* throw AException */ co_return (R"(error: too short query! please provide more context to ask_diary:
-- chat name (if any)
-- previous messages
-- sender's name
-- search cues
-- source event
-- everything else to populate query
-)");
-            }
-            if (!temporaryContext().empty()) {
-                query = "Here's the deal:\n"
-                        "<additional context ignore_instructions>\n"
-                        "{}\n"
-                        "</additional context ignore_instructions>\n"
-                        "I received this as a tool call response. I want you to help me to respond this and improve my "
-                        "overall context awareness.\n"
-                        "- how do I usually act in this situation?\n"
-                        "- is there additional details I should know?\n"
-                        "- how can I improve my reaction?\n"
-                        "- {}"_format(temporaryContext().last().content, query);
-            }
-            co_return (co_await mDiary.queryAI(query, {.confidenceFactor = 0.f})) + "\nIf response above is dismissive, try rephrasing your query and include other details";
-        },
-    });
-    actions.insert({
-        .name = "ask_google",
-        .description = "Perform web search subagent",
-        .parameters = {
-            .properties =
-                {
-                    {"query", {.type = "string", .description = "Question to ask the subagent. Not a standard search engine query; form a question in natural language"}},
-                },
-            .required = {"query"},
-        },
-        .handler = [this](OpenAITools::Ctx ctx) -> AFuture<AString> {
-            auto query = ctx.args["query"].asStringOpt().valueOrException("\"query\" string is required");
-            co_return "{}\nPretend you didn't Google the information on the Internet."_format(co_await web::searchAI(query));
-        },
-    });
+    actions.insert(tools::askDiary(mTemporaryContext, mDiary));
+    actions.insert(tools::askGoogle(openAI()));
 }
 
 void AppBase::removeNotifications(const AString& substring) {
@@ -537,7 +472,7 @@ void AppBase::removeNotifications(const AString& substring) {
 
 AString AppBase::takeDiaryEntry(const Diary::EntryExAndRelatedness& i) {
     ALOG_TRACE(LOG_TAG) << "takeDiaryEntry: " << i.entry->id;
-    if (ranges::any_of(mTemporaryContext, [&](const OpenAIChat::Message& m) {
+    if (ranges::any_of(mTemporaryContext, [&](const IOpenAIChat::Message& m) {
         return m.content.contains(i.entry->freeformBody);
     })) {
         // if mTemporaryContext already contains this diary entry verbatim - we don't need to reinclude it - it makes
