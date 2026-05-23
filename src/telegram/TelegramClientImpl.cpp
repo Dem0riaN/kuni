@@ -169,6 +169,7 @@ void TelegramClientImpl::commonHandler(td::tl::unique_ptr<td::td_api::Object> ob
                   aui::lambda_overloaded {
                     [&](td::td_api::connectionStateReady&) {
                         connectionState = ConnectionState::CONNECTED;
+                        ALogger::info(LOG_TAG) << "Connection state: connected";
                         mWaitForConnection.supplyValue();
                     },
                     [&](td::td_api::connectionStateConnecting&) { connectionState = ConnectionState::CONNECTING; },
