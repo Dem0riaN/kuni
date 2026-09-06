@@ -130,14 +130,22 @@ OpenAITools::Tool tools::stickers::send(_<ITelegramClient> telegram, _<td::td_ap
                 msg->chat_id_ = chat->id_;
                 msg->input_message_content_ = [&]() -> td::td_api::object_ptr<td::td_api::InputMessageContent> {
                     auto inputMessageSticker = td::td_api::make_object<td::td_api::inputMessageSticker>();
-                    inputMessageSticker->sticker_ = ITelegramClient::toPtr(td::td_api::inputFileRemote(sticker.sticker_->remote_->id_));
-                    inputMessageSticker->emoji_ = sticker.emoji_;
-                    inputMessageSticker->width_ = sticker.width_;
-                    inputMessageSticker->height_ = sticker.height_;
+
+                    // New TDLib API: inputSticker now requires all parameters in constructor
+                    auto inputSticker = td::td_api::make_object<td::td_api::inputSticker>(
+                        ITelegramClient::toPtr(td::td_api::inputFileRemote(sticker.sticker_->remote_->id_)),  // sticker_
+                        nullptr,                                                                                // thumbnail_
+                        sticker.width_,                                                                        // width_
+                        sticker.height_                                                                        // height_
+                    );
+                    inputMessageSticker->sticker_ = std::move(inputSticker);
+                    inputMessageSticker->emoji_ = sticker.emoji_;  // emoji moved to inputMessageSticker
+
                     return inputMessageSticker;
                 }();
                 if (replyTo != 0) {
-                    msg->reply_to_ = ITelegramClient::toPtr(td::td_api::inputMessageReplyToMessage(replyTo, nullptr, 0));
+                    // In TDLib v1.8.67, inputMessageReplyToMessage requires 4 parameters
+                    msg->reply_to_ = ITelegramClient::toPtr(td::td_api::inputMessageReplyToMessage(replyTo, nullptr, 0, ""));
                 }
                 return msg;
             }());

@@ -24,6 +24,7 @@
 #include "AUI/Util/ATokenizer.h"
 #include "util/openai_streaming.h"
 #include "util/tui_streaming.h"
+#include "util/RetryPolicy.h"
 
 static constexpr auto LOG_TAG = "OpenAIChat";
 
@@ -89,28 +90,39 @@ AFuture<AJson> OpenAIChatImpl::makeHttpRequest(Endpoint endpoint, std::string qu
         headers << "Authorization: Bearer {}"_format(endpoint.bearerKey);
     }
 
-    tryAgain:
-    auto response = AJson::fromBuffer((co_await ACurl::Builder(endpoint.baseUrl + "chat/completions")
-                                           .withMethod(ACurl::Method::HTTP_POST)
-                                           .withTimeout(config().requestTimeoutSecs)
-                                           .withHeaders(headers)
-                                           .withBody(query)
-                                           .runAsync())
-                                          .body);
+    RetryPolicy retryPolicy({
+        .maxRetries = 3,
+        .baseDelay = 1s,
+        .maxDelay = 30s,
+        .backoffMultiplier = 2.0
+    });
 
-    if (response.contains("error")) {
-        auto message = AJson::toString(response["error"]);
-        if (message.contains("model failed to load, this may be due to resource limitations or an internal error")) {
-            // if vram is VERY low, ollama even fails to unload the previous model.
-            // in ollama_setup.sh, we set OLLAMA_KEEP_ALIVE=1m, so we will just wait the ollama to unload the model,
-            // then try again.
-            ALogger::warn(LOG_TAG) << "Ollama model failed to load, wait and retry...";
-            co_await AThread::asyncSleep(1min / 2);
-            goto tryAgain;
+    co_return co_await retryPolicy.executeWithRetry([&]() -> AFuture<AJson> {
+        auto response = AJson::fromBuffer((co_await ACurl::Builder(endpoint.baseUrl + "chat/completions")
+                                               .withMethod(ACurl::Method::HTTP_POST)
+                                               .withTimeout(config().requestTimeoutSecs)
+                                               .withHeaders(headers)
+                                               .withBody(query)
+                                               .runAsync())
+                                              .body);
+
+        if (response.contains("error")) {
+            auto message = AJson::toString(response["error"]);
+            ALogger::warn(LOG_TAG) << "API error: " << message;
+
+            // Check if error is retryable
+            if (message.contains("model failed to load") ||
+                message.contains("resource limitations") ||
+                message.contains("internal error")) {
+                throw AException("Retryable error: " + message);
+            }
+
+            // Non-retryable error
+            throw AException("API error: " + message);
         }
-        throw AException("Ollama error: " + message);
-    }
-    co_return response;
+
+        co_return response;
+    }, LOG_TAG);
 }
 
 

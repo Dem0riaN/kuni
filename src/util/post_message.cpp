@@ -32,21 +32,35 @@ AFuture<td::td_api::object_ptr<td::td_api::message>> util::telegramPostMessage(
                     t->text_ = text;
                     return t;
                 }();
-                content->width_ = photo->get()->width();
-                content->height_ = photo->get()->height();
                 auto tempPath = "temp_{}.jpg"_format(std::chrono::system_clock::now().time_since_epoch().count());
                 JpgImageLoader::save(AFileOutputStream(tempPath), **photo);
-                content->photo_ = ITelegramClient::toPtr(td::td_api::inputFileLocal(tempPath));
+
+                // New TDLib API: inputPhoto now requires all parameters in constructor
+                auto inputPhoto = td::td_api::make_object<td::td_api::inputPhoto>(
+                    ITelegramClient::toPtr(td::td_api::inputFileLocal(tempPath)),  // photo_
+                    nullptr,                                                         // thumbnail_
+                    nullptr,                                                         // video_
+                    std::vector<int32_t>(),                                         // added_sticker_file_ids_
+                    photo->get()->width(),                                          // width_
+                    photo->get()->height()                                          // height_
+                );
+                content->photo_ = std::move(inputPhoto);
+                content->show_caption_above_media_ = false;
+                content->self_destruct_type_ = nullptr;
+                content->has_spoiler_ = false;
                 return content;
             }
 
             if (audioPath) {
                 auto content = td::td_api::make_object<td::td_api::inputMessageVoiceNote>();
-                content->voice_note_ = ITelegramClient::toPtr(td::td_api::inputFileLocal(audioPath->absolute().toStdString()));
-                // content->album_cover_thumbnail_ = nullptr;
-                content->duration_ = 0;
-                // content->title_ = audioPath->filename();
-                // content->performer_ = "";
+
+                // In TDLib v1.8.67, voice_note_ expects inputVoiceNote, not inputFileLocal
+                auto inputVoiceNote = td::td_api::make_object<td::td_api::inputVoiceNote>();
+                inputVoiceNote->voice_note_ = ITelegramClient::toPtr(td::td_api::inputFileLocal(audioPath->absolute().toStdString()));
+                inputVoiceNote->duration_ = 0;
+                inputVoiceNote->waveform_ = "";
+                content->voice_note_ = std::move(inputVoiceNote);
+
                 if (!text.empty()) {
                     content->caption_ = [&] {
                         auto t = td::td_api::make_object<td::td_api::formattedText>();
@@ -66,7 +80,9 @@ AFuture<td::td_api::object_ptr<td::td_api::message>> util::telegramPostMessage(
             return content;
         }();
         if (replyTo != 0) {
-            msg->reply_to_ = ITelegramClient::toPtr(td::td_api::inputMessageReplyToMessage(replyTo, nullptr, 0));
+            // In TDLib v1.8.67, inputMessageReplyToMessage requires 4 parameters:
+            // message_id, quote (nullable), checklist_task_id, poll_option_id
+            msg->reply_to_ = ITelegramClient::toPtr(td::td_api::inputMessageReplyToMessage(replyTo, nullptr, 0, ""));
         }
         return msg;
     }());
