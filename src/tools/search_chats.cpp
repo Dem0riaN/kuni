@@ -35,7 +35,10 @@ OpenAITools::Tool tools::searchChats(_<ITelegramClient> telegram) {
             AString result;
 
             try {
-                auto queryResult = co_await telegram->sendQueryWithResult(ITelegramClient::toPtr(td::td_api::searchChatsOnServer(query, 50)));
+                // In TDLib v1.8.67, searchChatsOnServer requires 3 parameters:
+                // query, type_filter (nullable), limit
+                auto queryResult = co_await telegram->sendQueryWithResult(
+                    ITelegramClient::toPtr(td::td_api::searchChatsOnServer(query, nullptr, 50)));
                 auto chatFutures =
                     queryResult->chat_ids_ | ranges::view::transform([&](td::td_api::int53 chatId) {
                         return telegram->getChat(chatId);

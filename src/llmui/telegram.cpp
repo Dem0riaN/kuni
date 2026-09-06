@@ -179,6 +179,10 @@ AString llmui::extractMessageTypeAndText(td::td_api::message& msg) {
               out += "[location] lat=" + AString::number(loc.location_->latitude_) +
                      " lon=" + AString::number(loc.location_->longitude_);
           },
+          [&](td::td_api::messageLiveLocation& loc) {
+              // In TDLib v1.8.67, liveLocation structure changed
+              out += "[live location]";
+          },
           [&](td::td_api::messageVenue& ven) { out += "[venue] " + ven.venue_->title_ + " — " + ven.venue_->address_; },
           [&](td::td_api::messageContact& c) {
               out += "[contact] " + c.contact_->first_name_ + " " + c.contact_->last_name_ + " (" +
@@ -287,9 +291,6 @@ AString llmui::extractMessageTypeAndText(td::td_api::message& msg) {
           [&](td::td_api::messageGiftedStars& stars) {
               out += "<gifted_stars count=\"{}\" />"_format(stars.star_count_);
           },
-          [&](td::td_api::messageGiftedTon& ton) {
-              out += "<gifted_ton amount=\"{}\" />"_format(ton.ton_amount_);
-          },
           [&](td::td_api::messageGiveawayPrizeStars& prize) {
               out += "<giveaway_prize_stars count=\"{}\" />"_format(prize.star_count_);
           },
@@ -336,7 +337,15 @@ AString llmui::extractMessageTypeAndText(td::td_api::message& msg) {
           // Passport
           [&](td::td_api::messagePassportDataReceived&) { out += "[passport data received]"; },
           [&](td::td_api::messagePassportDataSent&) { out += "[passport data sent]"; },
-          []<typename T>(T&) { static_assert(sizeof(T) == 0, "Missing handlers"); },
+          // New message types in TDLib v1.8.67 - additional handlers
+          [&](td::td_api::messageRichMessage&) { out += "[rich message]"; },
+          [&](td::td_api::messageManagedBotCreated&) { out += "[managed bot created]"; },
+          [&](td::td_api::messagePollOptionAdded&) { out += "[poll option added]"; },
+          [&](td::td_api::messagePollOptionDeleted&) { out += "[poll option deleted]"; },
+          [&](td::td_api::messageGiftedGrams&) { out += "[gifted grams]"; },
+          [&](td::td_api::messageChatJoinFromCommunity&) { out += "[chat join from community]"; },
+          [&](td::td_api::messageChatAddedToCommunity&) { out += "[chat added to community]"; },
+          [&](td::td_api::messageChatRemovedFromCommunity&) { out += "[chat removed from community]"; },
         });
     return out;
 }

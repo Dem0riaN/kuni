@@ -62,7 +62,7 @@ auib_import(date https://github.com/HowardHinnant/date)
 
 set(AUIB_TD_VALIDATE OFF)
 auib_import(Td https://github.com/tdlib/td
-        VERSION 0ae923c493bceb75433de2682ba8ae29cc7bf88d)
+        VERSION d1085f9cebc5a62379991ae1652673954f229c1f)
 
 aui_executable(${PROJECT_NAME})
 

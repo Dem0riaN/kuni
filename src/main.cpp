@@ -1,4 +1,6 @@
 #include <random>
+#include <csignal>
+#include <atomic>
 #include <range/v3/action/insert.hpp>
 #include <range/v3/algorithm/any_of.hpp>
 #include <range/v3/algorithm/max_element.hpp>
@@ -49,6 +51,7 @@
 #include "ui/debug/KuniDebugWindow.h"
 #include "util/is_accessible_from_lockdown.h"
 #include "util/post_message.h"
+#include "util/InputValidator.h"
 
 #include <range/v3/action/reverse.hpp>
 #include <range/v3/algorithm/contains.hpp>
@@ -182,10 +185,16 @@ public:
                         co_return "You can only call this tool once per turn.";
                     }
 
-                    auto chatId = util::jsonAsLongInt(ctx.args["chat_id"]).valueOrException("chat_id integer is required");
+                    // Validate chat_id with proper error handling
+                    int64_t chatId;
+                    try {
+                        chatId = util::InputValidator::validateChatId(ctx.args);
+                    } catch (const AException& e) {
+                        ALogger::warn(LOG_TAG) << "Invalid chat_id: " << e.getMessage();
+                        co_return "Error: {}"_format(e.getMessage());
+                    }
 
                     // Check lockdown mode - only allow PAPIK_CHAT_ID if lockdown is enabled
-
                     if (! co_await util::isAccessibleFromLockdown(*telegram(), chatId)) {
                         ALogger::err(LOG_TAG) << "Error: Lockdown mode is enabled. You can only open chat with ID {} (PAPIK_CHAT_ID)."_format(config().papikChatId);
                         co_return "No such chat";
@@ -209,13 +218,39 @@ public:
                             .required = {"invite_link"},
                         },
                     .handler = [this](OpenAITools::Ctx ctx) -> AFuture<AString> {
-                        auto inviteLink = ctx.args["invite_link"].asStringOpt().valueOrException("invite_link string is required");
+                        // Validate invite link
+                        AString inviteLink;
+                        try {
+                            inviteLink = util::InputValidator::validateString(ctx.args, "invite_link", 1, 500);
+                            inviteLink = util::InputValidator::validateInviteLink(inviteLink);
+                        } catch (const AException& e) {
+                            ALogger::warn(LOG_TAG) << "Invalid invite_link: " << e.getMessage();
+                            co_return "Error: {}"_format(e.getMessage());
+                        }
 
                         int64_t chatId;
                         try {
-                            auto joinedChat = co_await telegram()->sendQueryWithResult(
+                            auto joinResult = co_await telegram()->sendQueryWithResult(
                                 ITelegramClient::toPtr(td::td_api::joinChatByInviteLink(inviteLink.toStdString())));
-                            chatId = joinedChat->id_;
+
+                            // Handle ChatJoinResult using downcast_call instead of dynamic_cast
+                            bool success = false;
+                            td::td_api::downcast_call(
+                                *joinResult,
+                                aui::lambda_overloaded{
+                                    [&](td::td_api::chatJoinResultSuccess& result) {
+                                        chatId = result.chat_id_;
+                                        ALogger::info(LOG_TAG) << "Successfully joined chat: " << chatId;
+                                        success = true;
+                                    },
+                                    [&](auto&) {
+                                        ALogger::err(LOG_TAG) << "Failed to join chat by invite link \"" << inviteLink << "\": unexpected result type";
+                                    }
+                                });
+
+                            if (!success) {
+                                co_return "Error: failed to join chat by invite link";
+                            }
                         } catch (const AException& e) {
                             ALogger::err(LOG_TAG) << "Failed to join chat by invite link \"" << inviteLink << "\": " << e;
                             co_return "Error: failed to join chat by invite link: {}"_format(e.getMessage());
@@ -745,75 +780,100 @@ AUI_ENTRY {
     _<App> app;
     _<proxy_server::IProxyServer> proxyServer;
     _<proxy_server::ContextBridge> contextBridge;
+    _<TelegramClientImpl> telegram;
+
+    ALogger::info(LOG_TAG) << "Bot starting up...";
+
+    // Initialize OpenAI and proxy server immediately, independent of Telegram state
+    auto openAI = _new<OpenAIChatMeasurable>(std::make_unique<OpenAIChatImpl>());
+    std::shared_ptr<Diary> diary;
+
+    // Graceful shutdown handler using signal (Ctrl+C)
+    static std::atomic<bool> shutdownRequested{false};
+    auto setupShutdownHandler = [&]() {
+        std::signal(SIGINT, [](int) {
+            if (shutdownRequested.exchange(true)) {
+                // Second Ctrl+C = immediate exit
+                ALogger::warn("App") << "Force shutdown requested!";
+                std::_Exit(1);
+            }
+            ALogger::info("App") << "Shutdown requested. Bot is consolidating memory, please wait...";
+
+            // Stop event loop immediately
+            gEventLoop.stop();
+        });
+
+        ALogger::info(LOG_TAG) << "Bot is up and running.";
+        ALogger::info(LOG_TAG) << "Press Ctrl+C to shutdown...";
+    };
+
+    if (config().proxyEnabled) {
+        diary = std::make_shared<Diary>(Diary::Init { .diaryDir = "data/diary", .openAI = openAI });
+        proxyServer = proxy_server::init({
+          .upstreamEndpoint = config().llm.endpoint,
+          .port = 10434,
+          .toolsFactory = [openAI, diary](IOpenAIChat::Session ctx) {
+              return OpenAITools { tools::ask([ctx = std::move(ctx)] { return ctx.empty() ? AString {} : AString(ctx.last().content); }, openAI, *diary) };
+          },
+        });
+        contextBridge = _new<proxy_server::ContextBridge>(proxy_server::ContextBridge::Config { .endpoint = config().llm.endpoint, .diary = diary });
+        AObject::connect(proxyServer->sentRequestToLLM, AUI_SLOT(contextBridge)::collectRequestToLLM);
+        ALogger::info(LOG_TAG) << "Proxy server started on port 10434";
+    }
 
     if (config().telegramEnabled) {
-        auto telegram = _new<TelegramClientImpl>();
-        async << [](_<ITelegramClient> telegram) -> AFuture<> {
-            ALogger::info(LOG_TAG) << "Waiting for Telegram network...";
-            co_await telegram->waitForConnection();
-            switch (config().lockdown) {
-                case Config::LockdownMode::NONE: break;
-                case Config::LockdownMode::CONTACTS_ONLY:
-                    ALogger::info(LOG_TAG) << "Lockdown mode is enabled (config.toml lockdown). Kuni can only chat with her contacts."; break;
-                case Config::LockdownMode::PAPIK_ONLY:
-                    ALogger::info(LOG_TAG) << "Lockdown mode is enabled (config.toml lockdown). Kuni can only open chat with ID {} (PAPIK_CHAT_ID)."_format(config().papikChatId); break;
-            }
-        }(telegram);
+        telegram = _new<TelegramClientImpl>();
 
-        AObject::connect(telegram->loggedIn, telegram, [&] {
-            auto openAI = _new<OpenAIChatMeasurable>(std::make_unique<OpenAIChatImpl>());
+        // Start Telegram connection in background (non-blocking)
+        async << [telegram]() -> AFuture<> {
+            ALogger::info(LOG_TAG) << "Telegram client initializing in background...";
+            try {
+                co_await telegram->waitForConnection();
+                ALogger::info(LOG_TAG) << "Telegram connected successfully!";
+                switch (config().lockdown) {
+                    case Config::LockdownMode::NONE: break;
+                    case Config::LockdownMode::CONTACTS_ONLY:
+                        ALogger::info(LOG_TAG) << "Lockdown mode is enabled (config.toml lockdown). Kuni can only chat with her contacts."; break;
+                    case Config::LockdownMode::PAPIK_ONLY:
+                        ALogger::info(LOG_TAG) << "Lockdown mode is enabled (config.toml lockdown). Kuni can only open chat with ID {} (PAPIK_CHAT_ID)."_format(config().papikChatId); break;
+                }
+            } catch (const AException& e) {
+                ALogger::err(LOG_TAG) << "Failed to connect to Telegram: " << e.getMessage();
+            }
+        }();
+
+        AObject::connect(telegram->loggedIn, telegram, [&, openAI, diary] {
+            ALogger::info(LOG_TAG) << "Telegram logged in successfully!";
             app = _new<App>(telegram, openAI);
             async << app->sendNotificationsOnInit();
 
-            if (config().proxyEnabled) {
-                auto diary = std::make_shared<Diary>(Diary::Init { .diaryDir = "data/diary", .openAI = openAI });
-                proxyServer = proxy_server::init({
-                  .upstreamEndpoint = config().llm.endpoint,
-                  .port = 10434,
-                  .toolsFactory = [openAI, diary](IOpenAIChat::Session ctx) {
-                      return OpenAITools { tools::ask([ctx = std::move(ctx)] { return ctx.empty() ? AString {} : AString(ctx.last().content); }, openAI, *diary) };
-                  },
-                });
-                contextBridge = _new<proxy_server::ContextBridge>(proxy_server::ContextBridge::Config { .endpoint = config().llm.endpoint, .diary = diary });
-                AObject::connect(proxyServer->sentRequestToLLM, AUI_SLOT(contextBridge)::collectRequestToLLM);
+            if (config().proxyEnabled && contextBridge) {
                 app->chatHistoryMessageProcessors << contextBridge;
             }
-            prometheus = prometheus::setup(app->metricBreadcumbs());
-            prometheus->registerOpenAI(*openAI);
-            prometheus->registerAppBase(*app);
-            _new<AThread>([] {
-                ALogger::info(LOG_TAG) << "Bot is up and running. Press enter to shutdown gracefully.";
-                std::cin.get();
-                ALogger::info(LOG_TAG) << "Bot is shutting down. Please give some time to dump remaining context";
-                gEventLoop.stop();
-            })->start();
+
+            if (!prometheus) {
+                prometheus = prometheus::setup(app->metricBreadcumbs());
+                prometheus->registerOpenAI(*openAI);
+                prometheus->registerAppBase(*app);
+            }
         });
-    } else {
-        auto openAI = _new<OpenAIChatMeasurable>(std::make_unique<OpenAIChatImpl>());
-        if (config().proxyEnabled) {
-            auto diary = std::make_shared<Diary>(Diary::Init { .diaryDir = "data/diary", .openAI = openAI });
-            proxyServer = proxy_server::init({
-              .upstreamEndpoint = config().llm.endpoint,
-              .port = 10434,
-              .toolsFactory = [openAI, diary](IOpenAIChat::Session ctx) {
-                  return OpenAITools { tools::ask([ctx = std::move(ctx)] { return ctx.empty() ? AString {} : AString(ctx.last().content); }, openAI, *diary) };
-              },
-            });
-            contextBridge = _new<proxy_server::ContextBridge>(proxy_server::ContextBridge::Config { .endpoint = config().llm.endpoint, .diary = diary });
-            AObject::connect(proxyServer->sentRequestToLLM, AUI_SLOT(contextBridge)::collectRequestToLLM);
-            ALogger::info(LOG_TAG) << "Proxy server started standalone (No Telegram)!";
+
+        // Setup prometheus for standalone mode (without app metrics)
+        if (!prometheus) {
+            auto dummyBreadcrumbs = _new<MetricsBreadcumbs>();
+            prometheus = prometheus::setup(dummyBreadcrumbs);
+            prometheus->registerOpenAI(*openAI);
         }
-        
+    } else {
+        // Telegram disabled - setup prometheus for standalone mode
         auto dummyBreadcrumbs = _new<MetricsBreadcumbs>();
         prometheus = prometheus::setup(dummyBreadcrumbs);
         prometheus->registerOpenAI(*openAI);
-        _new<AThread>([] {
-            ALogger::info(LOG_TAG) << "Bot is up and running. Press enter to shutdown gracefully.";
-            std::cin.get();
-            ALogger::info(LOG_TAG) << "Bot is shutting down. Please give some time to dump remaining context";
-            gEventLoop.stop();
-        })->start();
+        ALogger::info(LOG_TAG) << "Running in standalone mode (Telegram disabled)";
     }
+
+    // Start shutdown handler after all components initialized
+    setupShutdownHandler();
 
     IEventLoop::Handle h(&gEventLoop);
     gEventLoop.loop();

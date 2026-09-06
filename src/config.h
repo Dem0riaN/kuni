@@ -68,6 +68,10 @@
   X(AString, recordVoiceOpenAIFormat, "mp3", "capabilities.record_voice.openai.response_format") \
   X(int, recordVoiceOpenAIPcmSampleRate, 24000, "capabilities.record_voice.openai.pcm_sample_rate") \
   X(bool, proxyEnabled, false, "capabilities.proxy.enabled") \
+  X(bool, telegramMtprotoProxyEnabled, false, "general.telegram_mtproto_proxy.enabled") \
+  X(AString, telegramMtprotoProxyServer, "", "general.telegram_mtproto_proxy.server") \
+  X(int, telegramMtprotoProxyPort, 443, "general.telegram_mtproto_proxy.port") \
+  X(AString, telegramMtprotoProxySecret, "", "general.telegram_mtproto_proxy.secret") \
 
 // clang-format on
 
