@@ -68,6 +68,13 @@ diarySaveEntries(Diary& diary, IOpenAIChat::Session context, IOpenAIChat::Params
 
 naxyi:
     IOpenAIChat::Response botAnswer = co_await diary.openAI()->chat(chatParams, context);
+
+    // Check if API returned valid response
+    if (botAnswer.choices.empty()) {
+        ALogger::err("diarySaveEntries") << "API returned empty choices array (likely HTTP 400). Cannot save diary entries.";
+        co_return AVector<Diary::EntryEx>{};
+    }
+
     if (botAnswer.choices.at(0).message.content.empty()) {
         context << std::move(botAnswer.choices.at(0).message);
         context << IOpenAIChat::Message {

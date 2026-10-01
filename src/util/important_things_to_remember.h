@@ -55,10 +55,18 @@ AFuture<AString> importantThingsToRemember(AppBase& app, IOpenAIChat& openAI, IO
     };
     bool shitCheckTriggered = false;
     for (;;) {
-        auto content = (co_await openAI.chat({
+        auto response = co_await openAI.chat({
             .systemPrompt = app.getSystemPrompt(),
             .config = config().llm,
-        }, context)).choices.at(0).message.content;
+        }, context);
+
+        // Check if API returned valid response
+        if (response.choices.empty()) {
+            ALogger::err("importantThingsToRemember") << "API returned empty choices array (likely HTTP 400). Returning previous working memory.";
+            co_return AString(previousWorkingMemory);
+        }
+
+        auto content = response.choices.at(0).message.content;
         if (content.contains("tool_calls") || content.contains("ask")) {
             // deepseek bug - attempts to use DSML to make a tool call.
             if (!shitCheckTriggered) {
