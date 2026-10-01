@@ -35,6 +35,8 @@ AFuture<AString> llmui::listFavoriteStickers(ITelegramClient& telegram, IOpenAIC
     AString out;
     auto favoriteStickers =
         co_await telegram.sendQueryWithResult(ITelegramClient::toPtr(td::td_api::getFavoriteStickers()));
+
+    AVector<AString> stickerList;
     for (auto& sticker : co_await getSavedStickers(telegram)) {
         llmui::checkForMaliciousPayloads(sticker->emoji_);
 
@@ -42,10 +44,12 @@ AFuture<AString> llmui::listFavoriteStickers(ITelegramClient& telegram, IOpenAIC
         const auto id = sticker->id_;
         tools::stickers::knownStickers()[id] = std::move(sticker);
 
-        // Return only metadata without downloading images to avoid curl timeout
-        out += "<sticker sticker_id=\"{}\" emoji=\"{}\" />\n"_format(id, tools::stickers::knownStickers()[id]->emoji_);
+        // Compact format: just ID and emoji
+        stickerList << "{}:{}"_format(id, tools::stickers::knownStickers()[id]->emoji_);
     }
-    co_return out;
+
+    // Return compact list
+    co_return "Stickers ({}): {}"_format(stickerList.size(), AStringVector(stickerList).join(", "));
 }
 
 OpenAITools::Tool tools::stickers::list(_<ITelegramClient> telegram, _<IOpenAIChat> openAI) {
