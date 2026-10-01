@@ -3,3 +3,30 @@ cmake-build-**
 *uild*
 .DS_Store
 bin
+
+# Local config
+config.toml
+config.toml:Zone.Identifier
+config — копия.toml
+config — копия.toml:Zone.Identifier
+
+# Generated/runtime data
+data/
+logs/
+logs_proxy/
+prompts/
+tdlib/
+telegram_login/
+
+# Logs and temporary files
+*.log
+last_query.json
+
+# Backup files
+*.bak
+
+# Local source/header files
+src/telegram/IAuthHandler.h
+src/telegram/StdinAuthHandler.h
+src/util/InputValidator.h
+src/util/RetryPolicy.h
