@@ -5,11 +5,11 @@
 namespace llmui {
 
 /**
- * @brief Loads image specified at pathToImage, and converts it to textual representation using IMG2TEXT endpoint.
- * @param temporaryContext additional context to provide to the model.
- * @param pathToImage path to image to describe.
+ * @brief Loads image specified at pathToImage, and embeds it directly for vision models.
+ * @param temporaryContext additional context to provide to the model (currently unused, kept for API compatibility).
+ * @param pathToImage path to image to embed.
  * @param xmlTag xml tag to use.
- * @return textural representation of image.
+ * @return embedded image with xml tags.
  */
 AFuture<AString> image(std::span<const IOpenAIChat::Message> temporaryContext, IOpenAIChat& openAI, AStringView pathToImage, AStringView xmlTag = "photo");
 }
