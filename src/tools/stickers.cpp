@@ -37,11 +37,13 @@ AFuture<AString> llmui::listFavoriteStickers(ITelegramClient& telegram, IOpenAIC
         co_await telegram.sendQueryWithResult(ITelegramClient::toPtr(td::td_api::getFavoriteStickers()));
     for (auto& sticker : co_await getSavedStickers(telegram)) {
         llmui::checkForMaliciousPayloads(sticker->emoji_);
-        const auto xmlTag =
-            "sticker sticker_id=\"{}\" emoji=\"{}\""_format(sticker->id_, sticker->emoji_);
-        // we rely on cache in llmui::image.
-        out += co_await llmui::image({}, openAI, co_await llmui::fetchMedia(telegram, sticker->sticker_), xmlTag);
-        out += "\n";
+
+        // Save sticker to knownStickers so it can be used with sticker_send
+        const auto id = sticker->id_;
+        tools::stickers::knownStickers()[id] = std::move(sticker);
+
+        // Return only metadata without downloading images to avoid curl timeout
+        out += "<sticker sticker_id=\"{}\" emoji=\"{}\" />\n"_format(id, tools::stickers::knownStickers()[id]->emoji_);
     }
     co_return out;
 }
